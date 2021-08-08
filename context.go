@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"math"
 	"mime/multipart"
 	"net"
@@ -39,7 +40,8 @@ const (
 // BodyBytesKey indicates a default body bytes key.
 const BodyBytesKey = "_gin-gonic/gin/bodybyteskey"
 
-const abortIndex int8 = math.MaxInt8 / 2
+// abortIndex represents a typical value used in abort functions.
+const abortIndex int8 = math.MaxInt8 >> 1
 
 // Context is the most important part of gin. It allows us to pass variables between middleware,
 // manage the flow, validate the JSON of a request and render a JSON response for example.
@@ -731,13 +733,22 @@ func (c *Context) ShouldBindBodyWith(obj interface{}, bb binding.BindingBody) (e
 // If the headers are nots syntactically valid OR the remote IP does not correspong to a trusted proxy,
 // the remote IP (coming form Request.RemoteAddr) is returned.
 func (c *Context) ClientIP() string {
-	switch {
-	case c.engine.AppEngine:
+	// Check if we're running on a trusted platform
+	switch c.engine.TrustedPlatform {
+	case PlatformGoogleAppEngine:
 		if addr := c.requestHeader("X-Appengine-Remote-Addr"); addr != "" {
 			return addr
 		}
-	case c.engine.CloudflareProxy:
+	case PlatformCloudflare:
 		if addr := c.requestHeader("CF-Connecting-IP"); addr != "" {
+			return addr
+		}
+	}
+
+	// Legacy "AppEngine" flag
+	if c.engine.AppEngine {
+		log.Println(`The AppEngine flag is going to be deprecated. Please check issues #2723 and #2739 and use 'TrustedPlatform: gin.PlatformGoogleAppEngine' instead.`)
+		if addr := c.requestHeader("X-Appengine-Remote-Addr"); addr != "" {
 			return addr
 		}
 	}
@@ -1150,22 +1161,28 @@ func (c *Context) SetAccepted(formats ...string) {
 /***** GOLANG.ORG/X/NET/CONTEXT *****/
 /************************************/
 
-// Deadline always returns that there is no deadline (ok==false),
-// maybe you want to use Request.Context().Deadline() instead.
+// Deadline returns that there is no deadline (ok==false) when c.Request has no Context.
 func (c *Context) Deadline() (deadline time.Time, ok bool) {
-	return
+	if c.Request == nil || c.Request.Context() == nil {
+		return
+	}
+	return c.Request.Context().Deadline()
 }
 
-// Done always returns nil (chan which will wait forever),
-// if you want to abort your work when the connection was closed
-// you should use Request.Context().Done() instead.
+// Done returns nil (chan which will wait forever) when c.Request has no Context.
 func (c *Context) Done() <-chan struct{} {
-	return nil
+	if c.Request == nil || c.Request.Context() == nil {
+		return nil
+	}
+	return c.Request.Context().Done()
 }
 
-// Err always returns nil, maybe you want to use Request.Context().Err() instead.
+// Err returns nil when c.Request has no Context.
 func (c *Context) Err() error {
-	return nil
+	if c.Request == nil || c.Request.Context() == nil {
+		return nil
+	}
+	return c.Request.Context().Err()
 }
 
 // Value returns the value associated with this context for key, or nil
@@ -1176,8 +1193,12 @@ func (c *Context) Value(key interface{}) interface{} {
 		return c.Request
 	}
 	if keyAsString, ok := key.(string); ok {
-		val, _ := c.Get(keyAsString)
-		return val
+		if val, exists := c.Get(keyAsString); exists {
+			return val
+		}
 	}
-	return nil
+	if c.Request == nil || c.Request.Context() == nil {
+		return nil
+	}
+	return c.Request.Context().Value(key)
 }
